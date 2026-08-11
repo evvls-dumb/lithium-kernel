@@ -30,3 +30,5 @@
   requires: x86_64 cross-compiler, nasm, grub2, xorriso, qemu
   thank you everyone and i hope y'all make some cool projects from my source.
   No license but please credit me if y'all make some bangers from this
+
+  idk how this thing boots tho, i made it very very very bad
