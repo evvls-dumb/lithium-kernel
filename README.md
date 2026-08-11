@@ -9,7 +9,7 @@
   - cooperative round-robin scheduler — tasks yield explicitly, no preemption yet
   - ELF64 loader — maps segments directly into user address spaces with NX per segment
   - 18 syscalls (read, write, open, close, fork, execve, exit, waitpid, mmap, brk, dup2, ...)
-  - tmpfs — fully in-memory filesystem, no disk
+  - tmpfs — fully in-memory filesystem, no disk :(
   - /bin, /dev, /etc, /proc, /tmp all populated at boot
   - user-space shell with I/O redirection (< file, > file), external commands, builtins
   - some sexy ps/2 keyboard (wierd driver issue which makes inputs garbage sometimes), vga text mode, com1 serial driver.
@@ -19,7 +19,7 @@
 
   missing
   - preemption (no spinlocks)
-  - disk driver / persistent filesystem
+  - disk driver / persistent filesystem (kinda raged while making so i quit)
   - smp
   - dynamic linker
 
