@@ -52,3 +52,27 @@ task_trampoline:
     extern task_exit
     call task_exit
     hlt
+
+; ── user_mode_enter ────────────────────────────────────────────
+; Called via context_switch for a newly-created user task.
+; r12 = user RIP, r13 = user RSP.
+global user_mode_enter
+user_mode_enter:
+    mov ax, 0x23        ; user data selector (GDT_USER_DATA | RPL3)
+    mov ds, ax
+    mov es, ax
+
+    push qword 0x23     ; SS
+    push r13            ; RSP
+    push qword 0x202    ; RFLAGS: IF=1, reserved bit set
+    push qword 0x1B     ; CS (GDT_USER_CODE | RPL3)
+    push r12            ; RIP
+    iretq
+
+; Called via context_switch for a newly-created fork child.
+; r12 = copied syscall_frame_t on the child's kernel stack.
+extern syscall_return_from_frame
+global fork_return_to_user
+fork_return_to_user:
+    mov rsp, r12
+    jmp syscall_return_from_frame

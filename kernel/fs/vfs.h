@@ -44,7 +44,6 @@ typedef struct {
 
 /* VFS globals. */
 extern vnode_t *vfs_root;
-extern file_t   fd_table[VFS_MAX_FDS];   /* global FD table for Phase 15 */
 
 /* Initialise: create root tmpfs, mount devfs at /dev. */
 void vfs_init(void);
@@ -57,8 +56,15 @@ int   vfs_open (const char *path);
 void  vfs_close(int fd);
 int   vfs_read (int fd, void *buf, size_t count);
 int   vfs_write(int fd, const void *buf, size_t count);
+int   vfs_open_in (file_t files[VFS_MAX_FDS], const char *path);
+void  vfs_close_in(file_t files[VFS_MAX_FDS], int fd);
+int   vfs_read_in (file_t files[VFS_MAX_FDS], int fd, void *buf, size_t count);
+int   vfs_write_in(file_t files[VFS_MAX_FDS], int fd, const void *buf, size_t count);
 int   vfs_readdir(const char *path, uint32_t idx,
                   char *name_out, vnode_type_t *type_out);
+int   vfs_mkdir(const char *path);
+int   vfs_create_file(const char *path, const void *data, size_t size);
+int   vfs_read_all(const char *path, void **out_buf, size_t *out_size);
 
 /* Create a new vnode under a parent directory. */
 vnode_t *vnode_create(vnode_t *parent, const char *name,

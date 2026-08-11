@@ -5,6 +5,7 @@
 #include "../../../lib/string.h"
 #include "../../../kernel/panic.h"
 #include "../../../kernel/irq.h"
+#include "../../../kernel/mm/vmm.h"
 
 extern uint64_t isr_table[256];
 
@@ -99,6 +100,12 @@ static void pic_eoi(uint8_t vector) {
 
 void isr_handler(interrupt_frame_t *frame) {
     if (frame->vector < 32) {
+        if (frame->vector == 14) {
+            uint64_t cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            if (vmm_handle_page_fault(cr2, frame->error_code))
+                return;
+        }
         panic_exception(frame);
     } else if (frame->vector < 48) {
         uint8_t irq = (uint8_t)(frame->vector - 32);

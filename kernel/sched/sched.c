@@ -4,13 +4,19 @@
 #include "../../lib/string.h"
 #include "../../lib/kprintf.h"
 #include "../../kernel/panic.h"
+#include "../../kernel/syscall/syscall.h"
+#include "../../kernel/mm/vmm.h"
 
 static task_t *run_queue_head = NULL;
 static uint32_t task_count    = 0;
 static task_t  *idle_task     = NULL;
 
 static void idle_fn(void *arg __attribute__((unused))) {
-    for (;;) __asm__ volatile ("sti; hlt");
+    for (;;) {
+        task_reap_detached_zombies();
+        sched_yield();
+        __asm__ volatile ("sti; hlt");
+    }
 }
 
 void sched_init(void) {
@@ -25,8 +31,9 @@ void sched_add(task_t *t) {
         t->next = t;
         run_queue_head = t;
     } else {
-        t->next = run_queue_head->next;
-        run_queue_head->next = t;
+        task_t *insert_after = current_task ? current_task : run_queue_head;
+        t->next = insert_after->next;
+        insert_after->next = t;
     }
     task_count++;
     __asm__ volatile ("push %0; popf" : : "r"(flags));
@@ -77,7 +84,12 @@ void schedule(void) {
 
     /* Retire dead task. */
     if (current_task->state == TASK_DEAD) {
+        task_t *parent = current_task->parent;
         sched_remove(current_task);
+        task_zombify(current_task);
+        if (parent &&
+            (parent->state == TASK_READY || parent->state == TASK_RUNNING))
+            next = parent;
     } else if (current_task->state == TASK_RUNNING) {
         current_task->state = TASK_READY;
     }
@@ -91,11 +103,17 @@ void schedule(void) {
         return;
     }
 
-    tss_set_rsp0((uint64_t)(uintptr_t)next->stack_base + TASK_STACK_SIZE);
+    uint64_t next_stack_top =
+        (uint64_t)(uintptr_t)next->stack_base + TASK_STACK_SIZE;
+    tss_set_rsp0(next_stack_top);
+    syscall_set_kernel_stack(next_stack_top);
 
     task_t *old  = current_task;
     current_task = next;
     next->state  = TASK_RUNNING;
+
+    if (old->cr3 != next->cr3)
+        vmm_switch((pte_t *)(uintptr_t)next->cr3);
 
     /* context_switch runs with IF=0; the new task enables IF on its own. */
     context_switch(&old->rsp, next->rsp);
@@ -120,6 +138,12 @@ void sched_start(task_t *first) {
 
     current_task       = first;
     first->state       = TASK_RUNNING;
+
+    uint64_t first_stack_top =
+        (uint64_t)(uintptr_t)first->stack_base + TASK_STACK_SIZE;
+    tss_set_rsp0(first_stack_top);
+    syscall_set_kernel_stack(first_stack_top);
+    vmm_switch((pte_t *)(uintptr_t)first->cr3);
 
     context_switch(&bootstrap.rsp, first->rsp);
     /* Never reached. */

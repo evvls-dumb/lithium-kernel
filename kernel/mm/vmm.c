@@ -40,6 +40,30 @@ static inline int pdpt_idx(uint64_t v) { return (int)((v >> 30) & 0x1FF); }
 static inline int pd_idx  (uint64_t v) { return (int)((v >> 21) & 0x1FF); }
 static inline int pt_idx  (uint64_t v) { return (int)((v >> 12) & 0x1FF); }
 
+static inline uint64_t make_virt(int pml4, int pdpt, int pd, int pt) {
+    return ((uint64_t)pml4 << 39) |
+           ((uint64_t)pdpt << 30) |
+           ((uint64_t)pd << 21) |
+           ((uint64_t)pt << 12);
+}
+
+static pte_t *vmm_get_pte(pte_t *pml4, uint64_t virt) {
+    if (!(pml4[pml4_idx(virt)] & VMM_PRESENT)) return NULL;
+    pte_t *pdpt = (pte_t *)(uintptr_t)(pml4[pml4_idx(virt)] & VMM_PHYS_MASK);
+
+    if (!(pdpt[pdpt_idx(virt)] & VMM_PRESENT) ||
+        (pdpt[pdpt_idx(virt)] & VMM_HUGE))
+        return NULL;
+    pte_t *pd = (pte_t *)(uintptr_t)(pdpt[pdpt_idx(virt)] & VMM_PHYS_MASK);
+
+    if (!(pd[pd_idx(virt)] & VMM_PRESENT) ||
+        (pd[pd_idx(virt)] & VMM_HUGE))
+        return NULL;
+    pte_t *pt = (pte_t *)(uintptr_t)(pd[pd_idx(virt)] & VMM_PHYS_MASK);
+
+    return &pt[pt_idx(virt)];
+}
+
 /* ── Public API ──────────────────────────────────────────────── */
 
 void vmm_switch(pte_t *pml4) {
@@ -56,15 +80,18 @@ pte_t *vmm_current_pml4(void) {
 int vmm_map_page(pte_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
     pte_t *pdpt = pt_walk_or_alloc(&pml4[pml4_idx(virt)]);
     if (!pdpt) return -1;
+    if (flags & VMM_USER) pml4[pml4_idx(virt)] |= VMM_USER;
 
     pte_t *pd = pt_walk_or_alloc(&pdpt[pdpt_idx(virt)]);
     if (!pd) return -1;
+    if (flags & VMM_USER) pdpt[pdpt_idx(virt)] |= VMM_USER;
 
     /* Refuse to silently split a 2 MiB huge page. */
     if (pd[pd_idx(virt)] & VMM_HUGE) return -1;
 
     pte_t *pt = pt_walk_or_alloc(&pd[pd_idx(virt)]);
     if (!pt) return -1;
+    if (flags & VMM_USER) pd[pd_idx(virt)] |= VMM_USER;
 
     pt[pt_idx(virt)] = (phys & VMM_PHYS_MASK) | (flags & ~VMM_PHYS_MASK) | VMM_PRESENT;
     __asm__ volatile ("invlpg (%0)" : : "r"(virt) : "memory");
@@ -104,6 +131,24 @@ uint64_t vmm_get_physical(pte_t *pml4, uint64_t virt) {
     return (pt[pt_idx(virt)] & VMM_PHYS_MASK) | (virt & 0xFFFULL);
 }
 
+uint64_t vmm_get_flags(pte_t *pml4, uint64_t virt) {
+    if (!(pml4[pml4_idx(virt)] & VMM_PRESENT)) return 0;
+    pte_t *pdpt = (pte_t *)(uintptr_t)(pml4[pml4_idx(virt)] & VMM_PHYS_MASK);
+
+    if (!(pdpt[pdpt_idx(virt)] & VMM_PRESENT)) return 0;
+    if (pdpt[pdpt_idx(virt)] & VMM_HUGE)
+        return pdpt[pdpt_idx(virt)] & ~VMM_PHYS_MASK;
+    pte_t *pd = (pte_t *)(uintptr_t)(pdpt[pdpt_idx(virt)] & VMM_PHYS_MASK);
+
+    if (!(pd[pd_idx(virt)] & VMM_PRESENT)) return 0;
+    if (pd[pd_idx(virt)] & VMM_HUGE)
+        return pd[pd_idx(virt)] & ~VMM_PHYS_MASK;
+    pte_t *pt = (pte_t *)(uintptr_t)(pd[pd_idx(virt)] & VMM_PHYS_MASK);
+
+    if (!(pt[pt_idx(virt)] & VMM_PRESENT)) return 0;
+    return pt[pt_idx(virt)] & ~VMM_PHYS_MASK;
+}
+
 pte_t *vmm_create_address_space(void) {
     uint64_t phys = pmm_alloc_frame();
     if (phys == PMM_ALLOC_FAILED) return NULL;
@@ -115,7 +160,184 @@ pte_t *vmm_create_address_space(void) {
     for (int i = 256; i < 512; i++)
         new_pml4[i] = cur[i];
 
+    /*
+     * Lithium still executes from the low identity map.  Give user address
+     * spaces their own PML4[0] / PDPT page, but copy the supervisor-only
+     * identity window at PDPT[0] so ring-0 can keep running after CR3 switches.
+     */
+    if (cur[0] & VMM_PRESENT) {
+        uint64_t low_pdpt_phys = pmm_alloc_frame();
+        if (low_pdpt_phys == PMM_ALLOC_FAILED) {
+            pmm_free_frame(phys);
+            return NULL;
+        }
+
+        pte_t *low_pdpt = (pte_t *)(uintptr_t)low_pdpt_phys;
+        pte_t *cur_low_pdpt = (pte_t *)(uintptr_t)(cur[0] & VMM_PHYS_MASK);
+        memset(low_pdpt, 0, PAGE_SIZE);
+        low_pdpt[0] = cur_low_pdpt[0];
+        new_pml4[0] = low_pdpt_phys | VMM_PRESENT | VMM_WRITE | VMM_USER;
+    }
+
     return new_pml4;
+}
+
+static void destroy_pt(pte_t *pt) {
+    for (int i = 0; i < 512; i++) {
+        if ((pt[i] & (VMM_PRESENT | VMM_USER)) != (VMM_PRESENT | VMM_USER))
+            continue;
+        pmm_free_frame(pt[i] & VMM_PHYS_MASK);
+        pt[i] = 0;
+    }
+}
+
+void vmm_destroy_user_address_space(pte_t *pml4) {
+    if (!pml4) return;
+
+    for (int i = 0; i < 256; i++) {
+        if (!(pml4[i] & VMM_PRESENT))
+            continue;
+
+        pte_t *pdpt = (pte_t *)(uintptr_t)(pml4[i] & VMM_PHYS_MASK);
+        for (int j = 0; j < 512; j++) {
+            if (i == 0 && j == 0)
+                continue; /* supervisor-only low identity window */
+            if (!(pdpt[j] & VMM_PRESENT))
+                continue;
+
+            if (pdpt[j] & VMM_HUGE) {
+                if (pdpt[j] & VMM_USER)
+                    pmm_free_frame(pdpt[j] & VMM_PHYS_MASK);
+                pdpt[j] = 0;
+                continue;
+            }
+
+            pte_t *pd = (pte_t *)(uintptr_t)(pdpt[j] & VMM_PHYS_MASK);
+            for (int k = 0; k < 512; k++) {
+                if (!(pd[k] & VMM_PRESENT))
+                    continue;
+
+                if (pd[k] & VMM_HUGE) {
+                    if (pd[k] & VMM_USER)
+                        pmm_free_frame(pd[k] & VMM_PHYS_MASK);
+                    pd[k] = 0;
+                    continue;
+                }
+
+                pte_t *pt = (pte_t *)(uintptr_t)(pd[k] & VMM_PHYS_MASK);
+                destroy_pt(pt);
+                pmm_free_frame(pd[k] & VMM_PHYS_MASK);
+                pd[k] = 0;
+            }
+
+            pmm_free_frame(pdpt[j] & VMM_PHYS_MASK);
+            pdpt[j] = 0;
+        }
+
+        pmm_free_frame(pml4[i] & VMM_PHYS_MASK);
+        pml4[i] = 0;
+    }
+
+    pmm_free_frame((uint64_t)(uintptr_t)pml4);
+}
+
+pte_t *vmm_clone_user_address_space(pte_t *src_pml4) {
+    if (!src_pml4)
+        return NULL;
+
+    pte_t *dst_pml4 = vmm_create_address_space();
+    if (!dst_pml4)
+        return NULL;
+
+    for (int i = 0; i < 256; i++) {
+        if (!(src_pml4[i] & VMM_PRESENT))
+            continue;
+
+        pte_t *src_pdpt = (pte_t *)(uintptr_t)(src_pml4[i] & VMM_PHYS_MASK);
+        for (int j = 0; j < 512; j++) {
+            if (i == 0 && j == 0)
+                continue; /* supervisor-only low identity window */
+            if (!(src_pdpt[j] & VMM_PRESENT))
+                continue;
+            if (src_pdpt[j] & VMM_HUGE) {
+                if (src_pdpt[j] & VMM_USER)
+                    goto fail;
+                continue;
+            }
+
+            pte_t *src_pd = (pte_t *)(uintptr_t)(src_pdpt[j] & VMM_PHYS_MASK);
+            for (int k = 0; k < 512; k++) {
+                if (!(src_pd[k] & VMM_PRESENT))
+                    continue;
+                if (src_pd[k] & VMM_HUGE) {
+                    if (src_pd[k] & VMM_USER)
+                        goto fail;
+                    continue;
+                }
+
+                pte_t *src_pt = (pte_t *)(uintptr_t)(src_pd[k] & VMM_PHYS_MASK);
+                for (int l = 0; l < 512; l++) {
+                    if ((src_pt[l] & (VMM_PRESENT | VMM_USER)) !=
+                        (VMM_PRESENT | VMM_USER))
+                        continue;
+
+                    uint64_t src_phys = src_pt[l] & VMM_PHYS_MASK;
+                    uint64_t virt = make_virt(i, j, k, l);
+                    uint64_t flags = src_pt[l] & ~VMM_PHYS_MASK;
+
+                    pmm_ref_frame(src_phys);
+                    if (flags & VMM_WRITE) {
+                        flags = (flags & ~VMM_WRITE) | VMM_COW;
+                        src_pt[l] = src_phys | flags;
+                        __asm__ volatile ("invlpg (%0)" : : "r"(virt) : "memory");
+                    }
+
+                    if (vmm_map_page(dst_pml4, virt, src_phys, flags) != 0) {
+                        pmm_free_frame(src_phys);
+                        goto fail;
+                    }
+                }
+            }
+        }
+    }
+
+    return dst_pml4;
+
+fail:
+    vmm_destroy_user_address_space(dst_pml4);
+    return NULL;
+}
+
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code) {
+    if ((error_code & 0x3) != 0x3 || fault_addr >= USER_SPACE_TOP)
+        return false;
+
+    uint64_t page = ALIGN_DOWN(fault_addr, PAGE_SIZE);
+    pte_t *pte = vmm_get_pte(vmm_current_pml4(), page);
+    if (!pte || ((*pte & (VMM_PRESENT | VMM_USER | VMM_COW)) !=
+                 (VMM_PRESENT | VMM_USER | VMM_COW)))
+        return false;
+
+    uint64_t old_phys = *pte & VMM_PHYS_MASK;
+    uint64_t flags = (*pte & ~VMM_PHYS_MASK & ~VMM_COW) | VMM_WRITE;
+
+    if (pmm_frame_refcount(old_phys) <= 1) {
+        *pte = old_phys | flags;
+        __asm__ volatile ("invlpg (%0)" : : "r"(page) : "memory");
+        return true;
+    }
+
+    uint64_t new_phys = pmm_alloc_frame();
+    if (new_phys == PMM_ALLOC_FAILED)
+        return false;
+
+    memcpy((void *)(uintptr_t)new_phys,
+           (const void *)(uintptr_t)old_phys,
+           PAGE_SIZE);
+    *pte = new_phys | flags;
+    pmm_free_frame(old_phys);
+    __asm__ volatile ("invlpg (%0)" : : "r"(page) : "memory");
+    return true;
 }
 
 uint64_t vmm_alloc_kernel(uint64_t size) {

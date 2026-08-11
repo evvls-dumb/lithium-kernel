@@ -35,6 +35,8 @@ void pmm_init(uint32_t boot_magic, uint32_t boot_info_phys);
  */
 uint64_t pmm_alloc_frame(void);
 void     pmm_free_frame(uint64_t phys_addr);
+void     pmm_ref_frame(uint64_t phys_addr);
+uint32_t pmm_frame_refcount(uint64_t phys_addr);
 
 /*
  * Allocate `count` physically *contiguous* 4 KiB frames (for DMA buffers).

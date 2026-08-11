@@ -11,6 +11,7 @@
  * Bit N set (1) means frame N is in use; clear (0) means free.
  */
 static uint8_t  pmm_bitmap[PMM_BITMAP_BYTES] __attribute__((aligned(8)));
+static uint16_t pmm_refcount[PMM_MAX_FRAMES];
 static uint64_t pmm_total_frames = 0;  /* highest usable frame index + 1 */
 static uint64_t pmm_free_frames  = 0;
 static uint64_t pmm_next_hint    = 0;
@@ -41,6 +42,7 @@ static void region_mark_free(uint64_t base, uint64_t len) {
     for (uint64_t f = first; f < last && f < pmm_total_frames; f++) {
         if (!frame_is_free(f)) {
             frame_set_free(f);
+            pmm_refcount[f] = 0;
             pmm_free_frames++;
         }
     }
@@ -53,6 +55,7 @@ static void region_mark_used(uint64_t base, uint64_t len) {
     for (uint64_t f = first; f < last && f < pmm_total_frames; f++) {
         if (frame_is_free(f)) {
             frame_set_used(f);
+            pmm_refcount[f] = 1;
             pmm_free_frames--;
         }
     }
@@ -117,6 +120,7 @@ static void pmm_parse_pvh(uint32_t info_phys) {
 
     /* Start with all frames marked used. */
     memset(pmm_bitmap, 0xFF, sizeof(pmm_bitmap));
+    memset(pmm_refcount, 0, sizeof(pmm_refcount));
     pmm_free_frames = 0;
 
     /* Iterate map: mark RAM entries free. */
@@ -157,6 +161,7 @@ static void pmm_parse_mb2(uint32_t info_phys) {
 
     pmm_calc_total_frames_mb2(mmap_tag);
     memset(pmm_bitmap, 0xFF, sizeof(pmm_bitmap));
+    memset(pmm_refcount, 0, sizeof(pmm_refcount));
     pmm_free_frames = 0;
 
     kprintf("PMM: Multiboot2 memory map:\n");
@@ -246,6 +251,7 @@ uint64_t pmm_alloc_frame(void) {
                 if (f >= pmm_total_frames) break;
                 if (!(pmm_bitmap[byte] & (uint8_t)(1u << bit))) {
                     pmm_bitmap[byte] |= (uint8_t)(1u << bit);
+                    pmm_refcount[f] = 1;
                     pmm_free_frames--;
                     pmm_next_hint = f + 1;
                     return f * PMM_FRAME_SIZE;
@@ -261,9 +267,29 @@ void pmm_free_frame(uint64_t phys_addr) {
     uint64_t f = phys_addr / PMM_FRAME_SIZE;
     KASSERT(f < pmm_total_frames);
     KASSERT(!frame_is_free(f));   /* double-free check */
+    KASSERT(pmm_refcount[f] > 0);
+    pmm_refcount[f]--;
+    if (pmm_refcount[f] > 0) return;
     frame_set_free(f);
     if (f < pmm_next_hint) pmm_next_hint = f;
     pmm_free_frames++;
+}
+
+void pmm_ref_frame(uint64_t phys_addr) {
+    KASSERT((phys_addr & (PMM_FRAME_SIZE - 1)) == 0);
+    uint64_t f = phys_addr / PMM_FRAME_SIZE;
+    KASSERT(f < pmm_total_frames);
+    KASSERT(!frame_is_free(f));
+    KASSERT(pmm_refcount[f] > 0);
+    KASSERT(pmm_refcount[f] < UINT16_MAX);
+    pmm_refcount[f]++;
+}
+
+uint32_t pmm_frame_refcount(uint64_t phys_addr) {
+    KASSERT((phys_addr & (PMM_FRAME_SIZE - 1)) == 0);
+    uint64_t f = phys_addr / PMM_FRAME_SIZE;
+    KASSERT(f < pmm_total_frames);
+    return pmm_refcount[f];
 }
 
 uint64_t pmm_alloc_contiguous(uint32_t count) {
@@ -280,6 +306,7 @@ uint64_t pmm_alloc_contiguous(uint32_t count) {
                 /* Found a run — mark all frames used. */
                 for (uint64_t j = run_start; j < run_start + count; j++) {
                     frame_set_used(j);
+                    pmm_refcount[j] = 1;
                 }
                 pmm_free_frames -= count;
                 return run_start * PMM_FRAME_SIZE;

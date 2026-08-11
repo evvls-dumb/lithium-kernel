@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.iso
+*.bin
+*.map
+
+# Generated ISO image dir (grub.cfg is already tracked and unaffected)
+iso/boot/lithium.elf
+
+# Logs
+*.log
+logs.md
+
+# Tools
+weppy-project-sync/

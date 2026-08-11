@@ -20,6 +20,7 @@
  */
 
 #define KERNEL_VMA   0xFFFFFFFF80000000ULL   /* higher-half kernel base */
+#define USER_SPACE_TOP 0x0000800000000000ULL
 #define PAGE_SIZE    4096ULL
 
 /* Page-table entry flags (Intel Vol 3, Table 4-5). */
@@ -32,6 +33,7 @@
 #define VMM_DIRTY    (1ULL << 6)
 #define VMM_HUGE     (1ULL << 7)   /* PS bit — 2 MiB (PD) or 1 GiB (PDPT) page */
 #define VMM_GLOBAL   (1ULL << 8)
+#define VMM_COW      (1ULL << 9)   /* software bit: copy-on-write user page    */
 #define VMM_NX       (1ULL << 63)  /* No-Execute (EFER.NXE must be set)         */
 
 /* Mask to extract the physical base address from an entry. */
@@ -60,9 +62,26 @@ void vmm_unmap_page(pte_t *pml4, uint64_t virt);
  * Handles 2 MiB huge pages.  Returns PMM_ALLOC_FAILED if not mapped. */
 uint64_t vmm_get_physical(pte_t *pml4, uint64_t virt);
 
+/* Return the final page-table entry flags for virt, or 0 if unmapped.
+ * Huge-page mappings return the PDPT/PD entry flags. */
+uint64_t vmm_get_flags(pte_t *pml4, uint64_t virt);
+
 /* Allocate a new PML4 with the kernel half (entries 256–511) shared
  * from the current address space.  Used for new processes. */
 pte_t *vmm_create_address_space(void);
+
+/* Destroy a user address space created by vmm_create_address_space().
+ * Frees user pages and user-owned lower-half page tables; kernel-shared
+ * mappings are left alone. */
+void vmm_destroy_user_address_space(pte_t *pml4);
+
+/* Clone user pages into a new address space using copy-on-write.
+ * The kernel half and supervisor identity window follow vmm_create_address_space().
+ * Returns NULL on allocation failure or unsupported user huge-page mappings. */
+pte_t *vmm_clone_user_address_space(pte_t *src_pml4);
+
+/* Resolve a user write fault to a COW page.  Returns true if handled. */
+bool vmm_handle_page_fault(uint64_t fault_addr, uint64_t error_code);
 
 /* Write pml4's physical address to CR3 (flushes TLB). */
 void vmm_switch(pte_t *pml4);

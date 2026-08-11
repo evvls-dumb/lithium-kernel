@@ -18,8 +18,8 @@
 #include "sched/sched.h"
 #include "sched/task.h"
 #include "fs/vfs.h"
+#include "syscall/syscall.h"
 #include "power/power.h"
-#include "shell/shell.h"
 
 #define MB2_BOOTLOADER_MAGIC 0x36D76289u
 #define MB1_BOOTLOADER_MAGIC 0x2BADB002u
@@ -27,6 +27,22 @@
 
 extern char _kernel_end[];
 extern char stack_top[];
+extern const uint8_t user_smoke_elf_start[];
+extern const uint8_t user_smoke_elf_end[];
+extern const uint8_t user_execer_elf_start[];
+extern const uint8_t user_execer_elf_end[];
+extern const uint8_t user_init_elf_start[];
+extern const uint8_t user_init_elf_end[];
+extern const uint8_t user_sh_elf_start[];
+extern const uint8_t user_sh_elf_end[];
+extern const uint8_t user_echo_elf_start[];
+extern const uint8_t user_echo_elf_end[];
+extern const uint8_t user_ls_elf_start[];
+extern const uint8_t user_ls_elf_end[];
+extern const uint8_t user_cat_elf_start[];
+extern const uint8_t user_cat_elf_end[];
+extern const uint8_t user_ps_elf_start[];
+extern const uint8_t user_ps_elf_end[];
 
 void kmain(uint32_t mb2_magic, uint32_t mb2_info_phys) {
 
@@ -52,15 +68,10 @@ void kmain(uint32_t mb2_magic, uint32_t mb2_info_phys) {
 
     uint64_t efer = rdmsr(MSR_EFER);
     const cpuid_features_t *f = cpuid_features();
-    if (f->has_nx)      efer |= EFER_NXE;
-    if (f->has_syscall) {
-        efer |= EFER_SCE;
-        wrmsr(MSR_STAR, ((uint64_t)GDT_KERNEL_CODE << 32) |
-                        ((uint64_t)GDT_USER_CODE   << 48));
-        wrmsr(MSR_LSTAR, 0); wrmsr(MSR_FMASK, 0x200);
-    }
+    if (f->has_nx) efer |= EFER_NXE;
     wrmsr(MSR_EFER, efer);
-    kprintf("[boot] CPU: GDT/IDT/TSS  EFER=0x%lx\n", efer);
+    syscall_init();
+    kprintf("[boot] CPU: GDT/IDT/TSS  EFER=0x%lx\n", rdmsr(MSR_EFER));
 
     /* ── Phase 2: PMM ────────────────────────────────────── */
     pmm_init(mb2_magic, mb2_info_phys);
@@ -89,15 +100,48 @@ void kmain(uint32_t mb2_magic, uint32_t mb2_info_phys) {
 
     /* ── Phase 10: VFS ───────────────────────────────────── */
     vfs_init();
+    KASSERT(vfs_mkdir("/bin") == 0);
+    KASSERT(vfs_create_file(
+        "/bin/smoke",
+        user_smoke_elf_start,
+        (size_t)(user_smoke_elf_end - user_smoke_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/init",
+        user_init_elf_start,
+        (size_t)(user_init_elf_end - user_init_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/sh",
+        user_sh_elf_start,
+        (size_t)(user_sh_elf_end - user_sh_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/echo",
+        user_echo_elf_start,
+        (size_t)(user_echo_elf_end - user_echo_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/ls",
+        user_ls_elf_start,
+        (size_t)(user_ls_elf_end - user_ls_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/cat",
+        user_cat_elf_start,
+        (size_t)(user_cat_elf_end - user_cat_elf_start)) == 0);
+    KASSERT(vfs_create_file(
+        "/bin/ps",
+        user_ps_elf_start,
+        (size_t)(user_ps_elf_end - user_ps_elf_start)) == 0);
 
     /* ── Power management ────────────────────────────────── */
     power_init(mb2_magic, mb2_info_phys);
 
-    kprintf("[boot] Boot complete; launching shell...\n");
+    kprintf("[boot] Boot complete; launching init...\n");
     timer_sleep_ms(1500);
     vga_clear();
 
-    /* Run the shell cooperatively.  Preemptive scheduling re-enabled in
-     * Phase 13 once spinlocks protect shared state (kprintf, VGA, serial). */
-    shell_run(NULL);
+    task_t *init = task_create_user_elf(
+        "init-loader",
+        user_execer_elf_start,
+        (size_t)(user_execer_elf_end - user_execer_elf_start));
+    KASSERT(init != NULL);
+
+    sched_start(init);
 }
