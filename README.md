@@ -24,10 +24,11 @@
   - dynamic linker
 
   building-
-  make
+  make, 
   make run
 
-  requires: x86_64 cross-compiler, nasm, grub2, xorriso, qemu
+  requires: x86_64 cross-compiler, nasm, grub2, xorriso, qemu. 
+  
   thank you everyone and i hope y'all make some cool projects from my source.
   No license but please credit me if y'all make some bangers from this
 
