@@ -54,6 +54,48 @@ void sched_remove(task_t *t) {
     }
 }
 
+static task_t *sched_pick_next(void) {
+    task_t *next = current_task->next;
+    for (uint32_t i = 0; i < task_count; i++) {
+        if (next && (next->state == TASK_READY || next->state == TASK_RUNNING))
+            break;
+        if (next) next = next->next;
+    }
+    return next;
+}
+
+static void sched_update_current(task_t **next_ptr) {
+    if (current_task->state == TASK_DEAD) {
+        task_t *parent = current_task->parent;
+        sched_remove(current_task);
+        task_zombify(current_task);
+        if (parent &&
+            (parent->state == TASK_READY || parent->state == TASK_RUNNING))
+            *next_ptr = parent;
+    } else if (current_task->state == TASK_RUNNING) {
+        current_task->state = TASK_READY;
+    }
+}
+
+static void sched_switch_to(task_t *next) {
+    uint64_t next_stack_top =
+        (uint64_t)(uintptr_t)next->stack_base + TASK_STACK_SIZE;
+    tss_set_rsp0(next_stack_top);
+    syscall_set_kernel_stack(next_stack_top);
+
+    task_t *old  = current_task;
+    current_task = next;
+    next->state  = TASK_RUNNING;
+
+    if (old->cr3 != next->cr3)
+        vmm_switch((pte_t *)(uintptr_t)next->cr3);
+
+    /* context_switch runs with IF=0; the new task enables IF on its own. */
+    context_switch(&old->rsp, next->rsp);
+    /* When context_switch returns here, the OLD task has been resumed
+     * (we're back in the ISR path) — IF is still 0, iretq will restore it. */
+}
+
 void schedule(void) {
     /*
      * Keep interrupts DISABLED throughout the switch.
@@ -74,25 +116,8 @@ void schedule(void) {
         return;
     }
 
-    /* Round-robin: find next READY task. */
-    task_t *next = current_task->next;
-    for (uint32_t i = 0; i < task_count; i++) {
-        if (next && (next->state == TASK_READY || next->state == TASK_RUNNING))
-            break;
-        if (next) next = next->next;
-    }
-
-    /* Retire dead task. */
-    if (current_task->state == TASK_DEAD) {
-        task_t *parent = current_task->parent;
-        sched_remove(current_task);
-        task_zombify(current_task);
-        if (parent &&
-            (parent->state == TASK_READY || parent->state == TASK_RUNNING))
-            next = parent;
-    } else if (current_task->state == TASK_RUNNING) {
-        current_task->state = TASK_READY;
-    }
+    task_t *next = sched_pick_next();
+    sched_update_current(&next);
 
     if (!next || (next->state != TASK_READY && next->state != TASK_RUNNING))
         next = idle_task;
@@ -103,22 +128,7 @@ void schedule(void) {
         return;
     }
 
-    uint64_t next_stack_top =
-        (uint64_t)(uintptr_t)next->stack_base + TASK_STACK_SIZE;
-    tss_set_rsp0(next_stack_top);
-    syscall_set_kernel_stack(next_stack_top);
-
-    task_t *old  = current_task;
-    current_task = next;
-    next->state  = TASK_RUNNING;
-
-    if (old->cr3 != next->cr3)
-        vmm_switch((pte_t *)(uintptr_t)next->cr3);
-
-    /* context_switch runs with IF=0; the new task enables IF on its own. */
-    context_switch(&old->rsp, next->rsp);
-    /* When context_switch returns here, the OLD task has been resumed
-     * (we're back in the ISR path) — IF is still 0, iretq will restore it. */
+    sched_switch_to(next);
 }
 
 void sched_yield(void) { schedule(); }
